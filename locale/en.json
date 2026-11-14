@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "title": "Copilot live models",
+    "description": "Sync GitHub Copilot models, capabilities and tiered input, output and cache prices from the live API, reusing sign-in with manual provider activation."
+  },
+  "config": {
+    "providers": "Manually added live providers (empty by default)",
+    "refreshIntervalSeconds": "Background sync interval (seconds)",
+    "cacheTtlSeconds": "Model list cache lifetime (seconds)",
+    "requestTimeoutMs": "Catalog request timeout (milliseconds)",
+    "streamIdleTimeoutMs": "Stream idle timeout (milliseconds)",
+    "apiVersion": "Copilot catalog API version",
+    "includeHiddenModels": "Include chat models hidden from the model picker",
+    "fallbackContextWindow": "Conservative fallback context capacity",
+    "fallbackMaxTokens": "Conservative fallback output capacity"
+  }
+}

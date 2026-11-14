@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "title": "Copilot 实时模型",
+    "description": "从 GitHub Copilot 在线目录同步模型、能力参数与分档价格，展示输入、输出和缓存报价，复用现有登录并保持手动添加。"
+  },
+  "config": {
+    "providers": "手动添加的实时提供商（默认为空）",
+    "refreshIntervalSeconds": "后台同步间隔（秒）",
+    "cacheTtlSeconds": "模型列表缓存时间（秒）",
+    "requestTimeoutMs": "目录请求超时（毫秒）",
+    "streamIdleTimeoutMs": "流式响应空闲超时（毫秒）",
+    "apiVersion": "Copilot 目录 API 版本",
+    "includeHiddenModels": "包含模型选择器隐藏的聊天模型",
+    "fallbackContextWindow": "缺失上下文参数时的保守回退值",
+    "fallbackMaxTokens": "缺失输出参数时的保守回退值"
+  }
+}

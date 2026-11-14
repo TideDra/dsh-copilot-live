@@ -1,0 +1,41 @@
+{
+  "name": "@local/dsh-copilot-live",
+  "version": "1.2.2",
+  "type": "module",
+  "description": "Synchronize account-scoped GitHub Copilot models, capabilities and prices from the live API into DeepSeek Harness.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TideDra/dsh-copilot-live.git"
+  },
+  "homepage": "https://github.com/TideDra/dsh-copilot-live#readme",
+  "bugs": {
+    "url": "https://github.com/TideDra/dsh-copilot-live/issues"
+  },
+  "engines": { "node": ">=24", "dsh": "0.2.2-rc.1" },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": ["index.js", "client.js", "auth.js", "catalog.js", "pricing.js", "controller.js", "adapter.js", "gemini-signatures.js", "cordis.patch.yml", "locale/*.json", "icon.svg", "README.md", "LICENSE"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web", "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-settings-models", "@deepseek-ai/dsh-client-ui-model-selection", "@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-api-remotes"]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm-pi-ai": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-credentials": "0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "~3.19.0",
+    "@earendil-works/pi-ai": "^1.5.2"
+  },
+  "scripts": {
+    "test": "node --import ./scripts/runtime-loader.mjs --test test/*.test.mjs",
+    "probe": "node --import ./scripts/runtime-loader.mjs ./scripts/probe.mjs"
+  }
+}

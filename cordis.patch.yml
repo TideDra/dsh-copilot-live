@@ -1,0 +1,13 @@
+- insert:
+    - id: local-copilot-live
+      name: '@local/dsh-copilot-live'
+      config:
+        providers: {}
+        refreshIntervalSeconds: 300
+        cacheTtlSeconds: 60
+        requestTimeoutMs: 20000
+        streamIdleTimeoutMs: 300000
+        apiVersion: '2026-06-01'
+        includeHiddenModels: false
+        fallbackContextWindow: 128000
+        fallbackMaxTokens: 8192
