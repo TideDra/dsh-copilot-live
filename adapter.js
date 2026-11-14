@@ -44,7 +44,7 @@ export class CopilotLiveAdapter extends LlmAdapter {
   async listModels(provider) {
     this.assertProvider(provider);
     try { return (await this.controller.refresh()).details.map(advertisedInfo); }
-    catch { return []; } // Catalog failures are visible in /copilot-models-status.
+    catch { return []; } // Catalog failures are visible through /api/copilot-live/status.
   }
   async snapshotFor(provider, model, signal) {
     this.assertProvider(provider);

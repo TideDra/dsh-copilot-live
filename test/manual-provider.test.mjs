@@ -68,14 +68,12 @@ test('dormant plugin declares the native Add candidate without registering a rou
     assert.equal(h.reads(), 0);
   } finally { await h.dispose(); }
 });
-test('status and refresh actions cannot silently add a dormant provider', async () => {
+test('status and refresh routes cannot silently add a dormant provider, and no slash commands are registered', async () => {
   const h = await harness();
   try {
-    const signal = new AbortController().signal;
-    const status = await h.commands.get('copilot-models-status').handler({ signal });
-    const refresh = await h.commands.get('copilot-models-refresh').handler({ signal });
-    assert.match(status.text, /尚未添加/);
-    assert.equal(refresh.kind, 'error');
+    assert.equal(h.commands.size, 0, 'plugin must not register any slash commands');
+    const statusRes = await h.routes.get('/api/copilot-live/status').fetch(new Request('http://test/api/copilot-live/status'));
+    assert.equal((await statusRes.json()).value.configured, false);
     const response = await h.routes.get('/api/copilot-live/refresh').fetch(new Request('http://test/api/copilot-live/refresh', { method: 'POST' }));
     assert.equal(response.status, 409);
     assert.equal(h.reads(), 0);
@@ -100,10 +98,11 @@ test('explicit configuration adds the route; native unset removes it and leaves 
     assert.equal(h.reads(), before);
   } finally { await h.dispose(); }
 });
-test('unloading the plugin removes its directory, commands and diagnostic routes', async () => {
+test('unloading the plugin removes its directory and diagnostic routes', async () => {
   const h = await harness();
   try {
     h.configure({ [LIVE_PROVIDER]: {} });
+    assert.equal(h.commands.size, 0);
     await h.fiber.dispose();
     assert(!h.root.llm.listProviders().some(provider => provider.id === LIVE_PROVIDER));
     assert(!h.root.llm.listConfigurableProviders().some(provider => provider.provider === LIVE_PROVIDER));

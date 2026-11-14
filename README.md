@@ -23,9 +23,8 @@ dsh plugin --profile web add /path/to/dsh-copilot-live -w
 1. 保留现有 GitHub Copilot 登录插件并完成登录；本插件复用 `llm-pi-ai/github-copilot` 的凭据，不要求复制令牌。
 2. 打开 **设置 → 模型 → 添加模型提供商 → 第三方模型提供商**，选择 **github-copilot-live**，点击卡片内的黑色按钮 **启用 Copilot 实时模型**，完成后关闭添加面板。
 3. 在聊天输入区的原生模型选择器内，选择 **github-copilot-live → Gemini 4 Carbon** 或其他在线模型。
-4. `/copilot-models-refresh` 立即强制同步；`/copilot-models-status` 查看是否已添加、目录来源、更新时间和各模型参数。
 
-**v1.1.0 起安装只声明“可添加”的候选项，不自动激活模型入口、不读取 Copilot 凭据、不启动后台同步。** 只有手动保存提供商配置后才注册实时入口；在模型设置中使用原生“移除”按钮删除该行会注销入口并停止同步，但不退出 Copilot 登录。状态/刷新命令都不会替你添加提供商。
+**v1.1.0 起安装只声明“可添加”的候选项，不自动激活模型入口、不读取 Copilot 凭据、不启动后台同步。** 只有手动保存提供商配置后才注册实时入口；在模型设置中使用原生“移除”按钮删除该行会注销入口并停止同步，但不退出 Copilot 登录。诊断与价格查询接口均不会替你添加提供商。
 
 当前 DSH 0.2.2-rc.1 的原生编辑器只支持内置适配器 namespace，独立插件的原生“保存”按钮会呈灰色。本插件通过官方 `settings.models.provider-card` 插槽提供自己的黑色 **“启用 Copilot 实时模型”** 按钮，使用相同的 Settings 版本校验与路径保存接口；不要点击上方灰色“保存”。v1.1.2 补齐了 `remote` 父级与 `remote.settings` 子级依赖，解决真实 Cordis 抛出 `cannot get property "remote" without inject` 导致点击无反应的问题。运行时接口在插件激活期间绑定，点击入口完整处理异常、拒绝及 20 秒超时，并合并重复点击，不会无提示卡住。超时不表示已经提交的写入被撤销，请先刷新设置检查是否已添加，再决定是否重试。
 
@@ -36,7 +35,7 @@ dsh plugin --profile web add /path/to/dsh-copilot-live -w
 ## 实现
 
 - 通过当前账号原生 Copilot 认证解析真实 API 域名，并调用 `GET /models`，不使用本地目录决定成员资格。
-- 每 5 分钟后台检查；模型列表/新请求读取时按 60 秒 TTL 更新；并发刷新合并为一次请求。命令可绕过 TTL。
+- 每 5 分钟后台检查；模型列表/新请求读取时按 60 秒 TTL 更新；并发刷新合并为一次请求。手动强制刷新可绕过 TTL。
 - 从在线目录同步协议、总上下文、输入/输出上限、图片数量/大小、视觉能力及推理档位；已知模型仅借用精确 ID 的原生传输兼容参数。
 - 根据 `supported_endpoints` 为模型选择 Chat Completions、Responses 或 Anthropic Messages，保留原生 Copilot 鉴权、请求头和流式转换。
 - 新模型的推理枚举完全取自在线能力；没有明确枚举时使用提供商默认，不凭模型名字虚构推理档位。
@@ -50,7 +49,6 @@ dsh plugin --profile web add /path/to/dsh-copilot-live -w
 - 在 **设置 → 模型 → github-copilot-live** 卡片内查看 **Copilot 模型价格**。已添加的提供商默认展开；未添加时可以点“查看各模型价格”作只读预览，不会因此启用提供商。
 - 仅列出当前可选的聊天模型（过滤策略禁用、选择器隐藏或不支持的模型），显示默认档和长上下文档的输入、输出、缓存读与缓存写价格。支持“刷新价格”、缓存时间及过期提示。
 - 聊天模型选择器的候选菜单项徽标精简显示默认档输入/输出单价（如 `入 $2.00 / 出 $10.00`，省略 `/百万 tokens`）；通过官方 `conversation.input.model.label` 插槽，模型被选中后在输入框触发器与一级菜单当前值中隐藏价格徽标（模型政策警告仍保留显示）。
-- `/copilot-models-prices` 使用同一个只读价格视图，在会话中列出可选模型价格，不修改配置或调用模型推理。
 
 显示单位为 **USD 等值 / 每百万 tokens**。按官方实现，新 tiered `token_prices` 为每个 `batch_size` token 的 AI credits：乘 `1000000 / batch_size`，再除以 100 得美元。旧 flat 格式还必须先除以 `1e9`；高级请求倍率是另一种旧制计费，不冒充 token 单价。缺省批次按官方约定为 1M，显式无效批次不归一化；缺失/无效价格显示“—/未提供”，不是免费；极小非零价格不显示成零。
 

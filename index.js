@@ -4,7 +4,7 @@ import { createCopilotAuth, COPILOT_RECORD } from './auth.js';
 import { LIVE_PROVIDER, LIVE_NAME } from './catalog.js';
 import { CatalogController, CatalogError } from './controller.js';
 import { CopilotLiveAdapter } from './adapter.js';
-import { PRICING_DOCUMENTATION, CREDIT_DOCUMENTATION, priceView, pricingDescription } from './pricing.js';
+import { PRICING_DOCUMENTATION, CREDIT_DOCUMENTATION, priceView } from './pricing.js';
 
 export const name = 'copilot-live-models';
 export const SETTINGS_NS = 'local-copilot-live';
@@ -128,51 +128,6 @@ export function apply(ctx, config) {
       models: (snapshot.priceModels ?? snapshot.details).filter(model => model.selectable !== false).map(priceView),
     };
   };
-  const summary = current => {
-    if (!current.configured) return notAdded;
-    const carbon = current.models.find(model => model.id === 'gemini-4-carbon');
-    return [
-      `${LIVE_NAME}：${current.state}；可选 ${current.modelCount} / 原始 ${current.rawModelCount} 个模型。`,
-      `来源：${current.source ?? '尚未取得在线目录'}`,
-      `上次成功同步：${current.lastSuccessfulAt ?? '无'}${current.stale ? '（当前为缓存）' : ''}`,
-      current.error ? `同步错误：${current.error.message}` : '',
-      carbon ? `Gemini 4 Carbon：上下文 ${carbon.contextWindow}；最大输入 ${carbon.maxPromptTokens}；最大输出 ${carbon.maxTokens}；推理 ${carbon.reasoning.efforts.join(' / ') || '提供商默认'}。` : 'Gemini 4 Carbon：当前在线目录未提供。',
-    ].filter(Boolean).join('\n');
-  };
-  ctx.inject(['commands'], commandsCtx => {
-    commandsCtx.effect(() => commandsCtx.commands.register({
-      name: 'copilot-models-refresh', description: '刷新手动添加的 Copilot 实时模型目录，不自动添加提供商',
-      handler: async ({ signal }) => {
-        if (!active) return { kind: 'error', text: notAdded };
-        try { await active.controller.refresh(true, signal); return { kind: 'success', text: summary(status()) }; }
-        catch (error) { return { kind: 'error', text: `${safeMessage(error)}\n${summary(status())}` }; }
-      },
-    }));
-    commandsCtx.effect(() => commandsCtx.commands.register({
-      name: 'copilot-models-prices', description: '只读查看 Copilot 各聊天模型输入、输出、缓存与长上下文标价，不添加提供商',
-      handler: async ({ signal }) => {
-        try {
-          const prices = await readPrices(signal);
-          return { kind: 'success', text: [
-            `Copilot API 当前报价（USD/百万 tokens）；1 AI credit = $0.01。来源：${prices.source}`,
-            `获取时间：${prices.fetchedAt}${prices.stale ? '（缓存已过期）' : ''}；标价非最终账单。`,
-            ...prices.models.map(model => `${model.name} [${model.id}] — ${pricingDescription(model.pricing, 'zh')}`),
-            `官方参考：${PRICING_DOCUMENTATION}`,
-          ].join('\n') };
-        } catch (error) { return { kind: 'error', text: safeMessage(error) }; }
-      },
-    }));
-    commandsCtx.effect(() => commandsCtx.commands.register({
-      name: 'copilot-models-status', description: '查看 Copilot 手动添加状态和实时目录参数，不自动启用入口',
-      handler: async ({ signal }) => {
-        if (active) { try { await active.controller.refresh(false, signal); } catch {} }
-        const current = status();
-        return { kind: 'success', text: `${summary(current)}\n${current.models.map(model =>
-          `${model.id} — ${model.contextWindow} 上下文 / ${model.maxTokens} 输出 / ${model.api} / 推理 ${model.reasoning.efforts.join(', ') || '默认'}`
-        ).join('\n')}`.trim() };
-      },
-    }));
-  });
   ctx.inject(['connection'], connected => {
     connected.effect(() => connected.connection.fetch.register({
       path: '/api/copilot-live/prices', methods: ['GET'], requestBody: 'buffered',
