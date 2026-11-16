@@ -1,19 +1,97 @@
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 
-/** Preserve Google's opaque tool-call signatures across the OpenAI-compatible
- * Copilot transport. Some pi-ai builds omit this field. Work at public provider
- * hooks only; never patch global fetch, installed packages, or session events. */
-export function geminiSignatureOptions(context, options = {}) {
-  const outgoing = new Map();
-  for (const message of context.messages) {
-    if (message.role !== 'assistant') continue;
-    for (const block of message.content) {
-      if (block.type === 'toolCall' && typeof block.thoughtSignature === 'string') outgoing.set(block.id, block.thoughtSignature);
+const COPILOT_OPAQUE_PREFIX = 'copilot-reasoning-opaque:';
+const PLAIN_REASONING_SIGNATURES = new Set(['reasoning', 'reasoning_content', 'reasoning_text']);
+
+export function encodeCopilotOpaque(opaque) {
+  return `${COPILOT_OPAQUE_PREFIX}${opaque}`;
+}
+export function decodeCopilotOpaque(signature) {
+  if (typeof signature !== 'string' || !signature.startsWith(COPILOT_OPAQUE_PREFIX)) return undefined;
+  const opaque = signature.slice(COPILOT_OPAQUE_PREFIX.length);
+  return opaque.length > 0 ? opaque : undefined;
+}
+function isKimiK3Plus(modelId = '') {
+  return /(?:^|[^a-z\d])kimi-k([3-9]|\d{2,})(?:[.\-p]|$)/i.test(modelId) || /(?:^|\/)k([3-9]|\d{2,})(?:[.\-:]|$)/i.test(modelId);
+}
+
+/**
+ * Extract ordered replay plans for same-model assistant messages that pi-ai's
+ * convertMessages() will actually emit in `payload.messages`.
+ */
+function buildAssistantReplayPlan(contextMessages = [], model) {
+  const plans = [];
+  for (let i = 0; i < contextMessages.length; i++) {
+    const message = contextMessages[i];
+    if (message?.role !== 'assistant' || !Array.isArray(message.content)) continue;
+    const isSameModel = message.provider === model.provider && message.api === model.api && message.model === model.id;
+    const hasText = message.content.some(block => block?.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0);
+    const hasToolCalls = message.content.some(block => block?.type === 'toolCall');
+    let hasKeptThinking = false;
+    let reasoningText = '';
+    let reasoningOpaque;
+    const googleToolSignatures = new Map();
+    if (isSameModel) {
+      const thinkingTexts = [];
+      for (const block of message.content) {
+        if (block?.type === 'thinking') {
+          const text = typeof block.thinking === 'string' ? block.thinking : '';
+          if (block.redacted || block.thinkingSignature || text.trim().length > 0) hasKeptThinking = true;
+          if (text.trim().length > 0) thinkingTexts.push(text);
+          const decoded = decodeCopilotOpaque(block.thinkingSignature);
+          if (decoded) reasoningOpaque = decoded;
+        } else if (block?.type === 'text') {
+          const decoded = decodeCopilotOpaque(block.textSignature);
+          if (decoded && !reasoningOpaque) reasoningOpaque = decoded;
+        } else if (block?.type === 'toolCall') {
+          const decoded = decodeCopilotOpaque(block.thoughtSignature);
+          if (decoded) {
+            if (!reasoningOpaque) reasoningOpaque = decoded;
+          } else if (typeof block.thoughtSignature === 'string' && block.thoughtSignature.length > 0) {
+            googleToolSignatures.set(block.id, block.thoughtSignature);
+          }
+        }
+      }
+      reasoningText = thinkingTexts.join('\n');
     }
+    // Mirror pi-ai's convertMessages skip condition: an assistant message is
+    // emitted iff it has visible text, tool calls, or a non-empty thinking block
+    // when requiresThinkingAsText is active (not set on Copilot Chat Completions).
+    const willEmit = hasText || hasToolCalls;
+    if (!willEmit && !hasKeptThinking) continue;
+    // Mirror VS Code Copilot's ChatToolCalls gate: a subsequent real user turn
+    // in the transcript makes earlier assistant turns historical. Only Kimi K3+
+    // replays thinking across user turns on Chat Completions; Gemini/others must
+    // strip historical thinking and only replay within the active tool-call loop.
+    const hasLaterUserTurn = contextMessages.slice(i + 1).some(later => later?.role === 'user');
+    plans.push({
+      willEmit,
+      isSameModel,
+      isHistorical: hasLaterUserTurn,
+      reasoningOpaque,
+      reasoningText,
+      googleToolSignatures,
+      hasUnsignedPlainReasoning: isSameModel && !reasoningOpaque && message.content.some(
+        block => block?.type === 'thinking' && PLAIN_REASONING_SIGNATURES.has(block.thinkingSignature),
+      ),
+    });
   }
+  return plans;
+}
+
+/** Preserve Copilot CAPI `reasoning_opaque` + `reasoning_text` pairs and Google
+ * `extra_content.google.thought_signature` across OpenAI-compatible Chat
+ * Completions. Also self-heals previously corrupted assistant messages that
+ * recorded `reasoning_text` without its paired `reasoning_opaque`. */
+export function geminiSignatureOptions(context, options = {}, targetModel) {
   const idsByIndex = new Map();
   const signaturesByIndex = new Map();
-  const incoming = new Map();
+  const incoming = {
+    toolSignatures: new Map(),
+    reasoningOpaque: undefined,
+    get(id) { return this.toolSignatures.get(id); },
+    get size() { return this.toolSignatures.size + (this.reasoningOpaque ? 1 : 0); },
+  };
   return {
     incoming,
     options: {
@@ -22,43 +100,134 @@ export function geminiSignatureOptions(context, options = {}) {
         const result = await options.onPayload?.(original, model);
         const payload = result ?? original;
         if (!payload || !Array.isArray(payload.messages)) return payload;
+        const activeModel = model ?? targetModel ?? { provider: 'github-copilot', api: 'openai-completions', id: '' };
+        const keepHistoricalThinking = isKimiK3Plus(activeModel.id);
+        const emittedPlans = buildAssistantReplayPlan(context?.messages, activeModel).filter(plan => plan.willEmit);
+        let assistantCursor = 0;
         return {
           ...payload,
           messages: payload.messages.map(message => {
-            if (message.role !== 'assistant' || !Array.isArray(message.tool_calls)) return message;
-            return { ...message, tool_calls: message.tool_calls.map(call => {
-              const signature = outgoing.get(call.id);
-              if (!signature) return call;
-              return { ...call, extra_content: { ...call.extra_content,
-                google: { ...call.extra_content?.google, thought_signature: signature } } };
-            }) };
+            if (message?.role !== 'assistant') return message;
+            const plan = emittedPlans[assistantCursor++];
+            let next = { ...message };
+            let mutated = false;
+            const allowThinkingReplay = plan ? (!plan.isHistorical || keepHistoricalThinking) : false;
+
+            if (plan?.reasoningOpaque && allowThinkingReplay) {
+              next.reasoning_opaque = plan.reasoningOpaque;
+              next.reasoning_text = plan.reasoningText;
+              delete next.reasoning;
+              delete next.reasoning_content;
+              mutated = true;
+            } else {
+              // Strip unreplayable plain reasoning fields:
+              // 1) Historical turns on Gemini/non-Kimi models where CAPI forbids cross-turn thinking replay;
+              // 2) Legacy corrupted turns that stored `reasoning_text` without `reasoning_opaque` (causes CAPI
+              //    to drop the SSE stream mid-flight without finish_reason on every retry).
+              if ('reasoning_text' in next && (!allowThinkingReplay || !('reasoning_opaque' in next))) {
+                delete next.reasoning_text;
+                mutated = true;
+              }
+              if (!allowThinkingReplay && !keepHistoricalThinking) {
+                for (const field of ['reasoning', 'reasoning_content', 'reasoning_opaque']) {
+                  if (field in next) { delete next[field]; mutated = true; }
+                }
+              }
+            }
+
+            if (Array.isArray(next.tool_calls) && plan?.googleToolSignatures.size) {
+              next.tool_calls = next.tool_calls.map(call => {
+                const signature = plan.googleToolSignatures.get(call.id);
+                if (!signature) return call;
+                mutated = true;
+                return {
+                  ...call,
+                  extra_content: {
+                    ...call.extra_content,
+                    google: { ...call.extra_content?.google, thought_signature: signature },
+                  },
+                };
+              });
+            }
+            return mutated ? next : message;
           }),
         };
       },
       async onProviderStreamEvent(chunk, model) {
         await options.onProviderStreamEvent?.(chunk, model);
         for (const choice of chunk?.choices ?? []) {
+          const opaque = choice?.message?.reasoning_opaque ?? choice?.delta?.reasoning_opaque;
+          if (typeof opaque === 'string' && opaque.length > 0) {
+            // Official VS Code SSEProcessor uses last-non-empty-write-wins for reasoning_opaque.
+            incoming.reasoningOpaque = opaque;
+          }
           for (const call of choice?.delta?.tool_calls ?? []) {
             const index = call.index ?? 0;
             if (call.id) idsByIndex.set(index, call.id);
             const signature = call.extra_content?.google?.thought_signature;
-            if (typeof signature === 'string' && signature.length) signaturesByIndex.set(index, signature);
+            if (typeof signature === 'string' && signature.length > 0) signaturesByIndex.set(index, signature);
             const id = idsByIndex.get(index);
             const current = signaturesByIndex.get(index);
-            if (id && current) incoming.set(id, current);
+            if (id && current) incoming.toolSignatures.set(id, current);
           }
         }
       },
     },
   };
 }
-export function attachGeminiSignatures(message, signatures) {
-  if (!message || !Array.isArray(message.content) || signatures.size === 0) return message;
-  return { ...message, content: message.content.map(block => {
-    const signature = block.type === 'toolCall' ? signatures.get(block.id) : undefined;
-    return signature ? { ...block, thoughtSignature: signature } : block;
-  }) };
+
+function getToolSignatures(signatures) {
+  return signatures instanceof Map ? signatures : signatures?.toolSignatures;
 }
+function getReasoningOpaque(signatures) {
+  return signatures instanceof Map ? undefined : signatures?.reasoningOpaque;
+}
+
+export function attachGeminiSignatures(message, signatures) {
+  if (!message || !Array.isArray(message.content)) return message;
+  const toolSignatures = getToolSignatures(signatures);
+  const opaque = getReasoningOpaque(signatures);
+  const hasToolSigs = (toolSignatures?.size ?? 0) > 0;
+  if (!hasToolSigs && !opaque) return message;
+
+  const encodedOpaque = opaque ? encodeCopilotOpaque(opaque) : undefined;
+  let opaqueAttached = false;
+  let changed = false;
+
+  // Prefer attaching `reasoning_opaque` to the thinking block (replacing pi-ai's
+  // literal `"reasoning_text"` placeholder). If the response had no readable
+  // thinking block (e.g. pure tool call or pure text with opaque state), attach
+  // it to the first text block's `textSignature` or first toolCall's `thoughtSignature`
+  // without altering block count (so BlockAssembler's length check stays intact).
+  const hasThinking = message.content.some(block => block?.type === 'thinking');
+  const content = message.content.map(block => {
+    if (block?.type === 'thinking' && encodedOpaque && !opaqueAttached) {
+      opaqueAttached = true;
+      changed = true;
+      return { ...block, thinkingSignature: encodedOpaque };
+    }
+    if (block?.type === 'text' && encodedOpaque && !hasThinking && !opaqueAttached) {
+      opaqueAttached = true;
+      changed = true;
+      return { ...block, textSignature: encodedOpaque };
+    }
+    if (block?.type === 'toolCall') {
+      const explicitToolSig = toolSignatures?.get(block.id);
+      if (explicitToolSig) {
+        changed = true;
+        return { ...block, thoughtSignature: explicitToolSig };
+      }
+      if (encodedOpaque && !hasThinking && !opaqueAttached) {
+        opaqueAttached = true;
+        changed = true;
+        return { ...block, thoughtSignature: encodedOpaque };
+      }
+    }
+    return block;
+  });
+  return changed ? { ...message, content } : message;
+}
+
 export function wrapGeminiStream(source, signatures, model) {
   const target = createAssistantMessageEventStream();
   void (async () => {
@@ -66,7 +235,7 @@ export function wrapGeminiStream(source, signatures, model) {
       let forwarded = event;
       if (event.partial) forwarded = { ...forwarded, partial: attachGeminiSignatures(event.partial, signatures) };
       if (event.type === 'toolcall_end') {
-        const signature = signatures.get(event.toolCall.id);
+        const signature = getToolSignatures(signatures)?.get(event.toolCall.id);
         if (signature) forwarded = { ...forwarded, toolCall: { ...event.toolCall, thoughtSignature: signature } };
       }
       if (event.type === 'done') forwarded = { ...forwarded, message: attachGeminiSignatures(event.message, signatures) };

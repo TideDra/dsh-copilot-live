@@ -66,8 +66,8 @@ export class CopilotLiveAdapter extends LlmAdapter {
     if (cache.has(detail.id)) return cache.get(detail.id);
     const base = githubCopilotProvider();
     const stream = (method, model, context, options) => {
-      if (model.api !== 'openai-completions' || !/^gemini-/i.test(model.id)) return base[method](model, context, options);
-      const signature = geminiSignatureOptions(context, options);
+      if (model.api !== 'openai-completions') return base[method](model, context, options);
+      const signature = geminiSignatureOptions(context, options, model);
       return wrapGeminiStream(base[method](model, context, signature.options), signature.incoming, model);
     };
     // Native Copilot remains the transport identity so X-Initiator, vision,

@@ -39,7 +39,7 @@ dsh plugin --profile web add /path/to/dsh-copilot-live -w
 - 从在线目录同步协议、总上下文、输入/输出上限、图片数量/大小、视觉能力及推理档位；已知模型仅借用精确 ID 的原生传输兼容参数。
 - 根据 `supported_endpoints` 为模型选择 Chat Completions、Responses 或 Anthropic Messages，保留原生 Copilot 鉴权、请求头和流式转换。
 - 新模型的推理枚举完全取自在线能力；没有明确枚举时使用提供商默认，不凭模型名字虚构推理档位。
-- 保留 Gemini 工具调用返回的 `extra_content.google.thought_signature`，并在后续请求回传；仅使用公开 provider hooks，不修改 DSH/pi-ai 文件或全局 fetch。
+- 完整兼容 Copilot Chat Completions 模型的推理签名（包括 `gemini-4-hydrogen` 等新模型的顶层 `delta.reasoning_opaque` + `reasoning_text` 配对回传、旧模型 `extra_content.google.thought_signature` 回传、跨用户 Turn 历史思维按官方策略剥离，以及对缺少配对 `reasoning_opaque` 的旧残缺会话自动清理自愈）；仅使用公开 provider hooks，不修改 DSH/pi-ai 文件或全局 fetch。
 - 过滤禁用策略、隐藏模型（可配置）、非聊天、无工具调用或无流式能力的模型。`unconfigured` 策略标为“需确认条款”，不会擅自修改 GitHub 策略。
 - 同一账号刷新失败时保留上次成功目录并显示 stale；切换账号或退出登录后清除原账号目录，防止错误继承可用性。
 - 凭据只通过 DSH credential service 读取及原生刷新锁更新；状态、日志和测试产物不包含令牌。只把令牌发送至认证提供的 GitHub Copilot HTTPS 端点。
