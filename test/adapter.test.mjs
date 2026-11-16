@@ -34,9 +34,25 @@ test('native DSH registry lists and resolves a live model without static members
     await assert.rejects(() => ctx.llm.prepareCall({ provider: LIVE_PROVIDER, model: 'gemini-4-carbon', reasoningEffort: 'xhigh' }), { code: 'UNSUPPORTED_REASONING_EFFORT' });
   } finally { await ctx.fiber.dispose(); }
 });
-test('prepared call rejects an output budget above the online maximum', async () => {
-  const call = await makeAdapter().prepareCall(LIVE_PROVIDER, 'gemini-4-carbon');
-  assert.throws(() => call.stream({ provider: LIVE_PROVIDER, model: 'gemini-4-carbon', messages: [], maxTokens: 64001 }), { code: 'UNSUPPORTED_OPTION' });
+test('prepared call clamps maxTokens above the online maximum instead of throwing', async () => {
+  const adapter = makeAdapter();
+  const captured = [];
+  adapter.delegateFor = () => ({
+    prepareCall: async () => ({
+      model: { provider: 'github-copilot', id: 'gemini-4-carbon', name: 'Gemini 4 Carbon', inputModalities: ['text', 'image'], context: { contextWindow: 1000000 } },
+      stream: async function* (opts) {
+        captured.push(opts.maxTokens);
+        yield { type: 'finish', reason: { kind: 'stop' } };
+      },
+    }),
+  });
+  const call = await adapter.prepareCall(LIVE_PROVIDER, 'gemini-4-carbon');
+  const overInput = Object.freeze({ provider: LIVE_PROVIDER, model: 'gemini-4-carbon', messages: Object.freeze([]), maxTokens: 128000 });
+  await Array.fromAsync(call.stream(overInput));
+  assert.equal(overInput.maxTokens, 128000);
+  await Array.fromAsync(call.stream({ provider: LIVE_PROVIDER, model: 'gemini-4-carbon', messages: [], maxTokens: 32000 }));
+  await Array.fromAsync(call.stream({ provider: LIVE_PROVIDER, model: 'gemini-4-carbon', messages: [] }));
+  assert.deepEqual(captured, [64000, 32000, undefined]);
 });
 test('unknown live IDs fail before inference', async () => {
   await assert.rejects(() => makeAdapter().resolveModel(LIVE_PROVIDER, 'model-not-returned-by-api'), { code: 'UNKNOWN_MODEL' });

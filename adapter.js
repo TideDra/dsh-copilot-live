@@ -11,9 +11,14 @@ export function rebaseReplay(replay, from, to) {
   if (replay?.response?.kind !== 'pi-ai' || replay.response.provider !== from) return replay;
   return { ...replay, response: { ...replay.response, provider: to } };
 }
-export function nativeOptions(options) {
+export function nativeOptions(options, maxTokensCap) {
+  const maxTokens = options.maxTokens !== undefined && maxTokensCap !== undefined
+    ? Math.min(options.maxTokens, maxTokensCap)
+    : options.maxTokens;
   return {
-    ...options, provider: NATIVE_PROVIDER,
+    ...options,
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+    provider: NATIVE_PROVIDER,
     messages: options.messages.map(message => {
       if (message.role !== 'assistant' || message.source?.provider !== LIVE_PROVIDER) return message;
       return { ...message, source: { ...message.source, provider: NATIVE_PROVIDER,
@@ -110,12 +115,7 @@ export class CopilotLiveAdapter extends LlmAdapter {
     const prepared = await this.delegateFor(snapshot, detail).prepareCall(NATIVE_PROVIDER, model, signal);
     return {
       model: this.externalInfo(prepared.model, detail),
-      stream: options => {
-        if (options.maxTokens !== undefined && options.maxTokens > detail.maxTokens) {
-          throw new LlmError(`模型 "${model}" 最大输出为 ${detail.maxTokens} tokens。`, 'UNSUPPORTED_OPTION');
-        }
-        return externalChunks(prepared.stream(nativeOptions(options)));
-      },
+      stream: options => externalChunks(prepared.stream(nativeOptions(options, detail.maxTokens))),
     };
   }
   imageRequestTarget(provider, model, image) {
