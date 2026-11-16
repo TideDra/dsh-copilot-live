@@ -1,7 +1,6 @@
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 
 const COPILOT_OPAQUE_PREFIX = 'copilot-reasoning-opaque:';
-const PLAIN_REASONING_SIGNATURES = new Set(['reasoning', 'reasoning_content', 'reasoning_text']);
 
 export function encodeCopilotOpaque(opaque) {
   return `${COPILOT_OPAQUE_PREFIX}${opaque}`;
@@ -16,10 +15,26 @@ function isKimiK3Plus(modelId = '') {
 }
 
 /**
- * Extract ordered replay plans for same-model assistant messages that pi-ai's
- * convertMessages() will actually emit in `payload.messages`.
+ * Build ordered replay plans for assistant messages emitted by pi-ai's
+ * convertMessages() into `payload.messages`.
  */
 function buildAssistantReplayPlan(contextMessages = [], model) {
+  // An assistant turn only becomes historical once a final (non-tool-call)
+  // assistant response has completed the task AND a new user turn follows it.
+  // Mid-turn user injections in DSH (such as 10-minute time-context samples,
+  // background job notices, or user steer messages after tool results) happen
+  // before any final non-tool-call reply, so active tool-call rounds keep their
+  // `reasoning_opaque` intact (matching VS Code's `continuesCurrentTask` gate).
+  let lastHistoricalBoundary = -1;
+  for (let i = 0; i < contextMessages.length; i++) {
+    const msg = contextMessages[i];
+    if (msg?.role !== 'assistant' || !Array.isArray(msg.content)) continue;
+    const hasToolCalls = msg.content.some(block => block?.type === 'toolCall');
+    if (!hasToolCalls && contextMessages.slice(i + 1).some(later => later?.role === 'user')) {
+      lastHistoricalBoundary = i;
+    }
+  }
+
   const plans = [];
   for (let i = 0; i < contextMessages.length; i++) {
     const message = contextMessages[i];
@@ -27,7 +42,8 @@ function buildAssistantReplayPlan(contextMessages = [], model) {
     const isSameModel = message.provider === model.provider && message.api === model.api && message.model === model.id;
     const hasText = message.content.some(block => block?.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0);
     const hasToolCalls = message.content.some(block => block?.type === 'toolCall');
-    let hasKeptThinking = false;
+    if (!hasText && !hasToolCalls) continue;
+
     let reasoningText = '';
     let reasoningOpaque;
     const googleToolSignatures = new Map();
@@ -36,7 +52,6 @@ function buildAssistantReplayPlan(contextMessages = [], model) {
       for (const block of message.content) {
         if (block?.type === 'thinking') {
           const text = typeof block.thinking === 'string' ? block.thinking : '';
-          if (block.redacted || block.thinkingSignature || text.trim().length > 0) hasKeptThinking = true;
           if (text.trim().length > 0) thinkingTexts.push(text);
           const decoded = decodeCopilotOpaque(block.thinkingSignature);
           if (decoded) reasoningOpaque = decoded;
@@ -54,26 +69,12 @@ function buildAssistantReplayPlan(contextMessages = [], model) {
       }
       reasoningText = thinkingTexts.join('\n');
     }
-    // Mirror pi-ai's convertMessages skip condition: an assistant message is
-    // emitted iff it has visible text, tool calls, or a non-empty thinking block
-    // when requiresThinkingAsText is active (not set on Copilot Chat Completions).
-    const willEmit = hasText || hasToolCalls;
-    if (!willEmit && !hasKeptThinking) continue;
-    // Mirror VS Code Copilot's ChatToolCalls gate: a subsequent real user turn
-    // in the transcript makes earlier assistant turns historical. Only Kimi K3+
-    // replays thinking across user turns on Chat Completions; Gemini/others must
-    // strip historical thinking and only replay within the active tool-call loop.
-    const hasLaterUserTurn = contextMessages.slice(i + 1).some(later => later?.role === 'user');
+
     plans.push({
-      willEmit,
-      isSameModel,
-      isHistorical: hasLaterUserTurn,
+      isHistorical: i <= lastHistoricalBoundary,
       reasoningOpaque,
       reasoningText,
       googleToolSignatures,
-      hasUnsignedPlainReasoning: isSameModel && !reasoningOpaque && message.content.some(
-        block => block?.type === 'thinking' && PLAIN_REASONING_SIGNATURES.has(block.thinkingSignature),
-      ),
     });
   }
   return plans;
@@ -81,8 +82,7 @@ function buildAssistantReplayPlan(contextMessages = [], model) {
 
 /** Preserve Copilot CAPI `reasoning_opaque` + `reasoning_text` pairs and Google
  * `extra_content.google.thought_signature` across OpenAI-compatible Chat
- * Completions. Also self-heals previously corrupted assistant messages that
- * recorded `reasoning_text` without its paired `reasoning_opaque`. */
+ * Completions using public provider hooks only. */
 export function geminiSignatureOptions(context, options = {}, targetModel) {
   const idsByIndex = new Map();
   const signaturesByIndex = new Map();
@@ -102,7 +102,7 @@ export function geminiSignatureOptions(context, options = {}, targetModel) {
         if (!payload || !Array.isArray(payload.messages)) return payload;
         const activeModel = model ?? targetModel ?? { provider: 'github-copilot', api: 'openai-completions', id: '' };
         const keepHistoricalThinking = isKimiK3Plus(activeModel.id);
-        const emittedPlans = buildAssistantReplayPlan(context?.messages, activeModel).filter(plan => plan.willEmit);
+        const emittedPlans = buildAssistantReplayPlan(context?.messages, activeModel);
         let assistantCursor = 0;
         return {
           ...payload,
@@ -114,23 +114,21 @@ export function geminiSignatureOptions(context, options = {}, targetModel) {
             const allowThinkingReplay = plan ? (!plan.isHistorical || keepHistoricalThinking) : false;
 
             if (plan?.reasoningOpaque && allowThinkingReplay) {
+              // CAPI contract (CopilotChatEndpoint): emit reasoning_opaque and
+              // reasoning_text together whenever an opaque token is present.
               next.reasoning_opaque = plan.reasoningOpaque;
               next.reasoning_text = plan.reasoningText;
               delete next.reasoning;
               delete next.reasoning_content;
               mutated = true;
             } else {
-              // Strip unreplayable plain reasoning fields:
-              // 1) Historical turns on Gemini/non-Kimi models where CAPI forbids cross-turn thinking replay;
-              // 2) Legacy corrupted turns that stored `reasoning_text` without `reasoning_opaque` (causes CAPI
-              //    to drop the SSE stream mid-flight without finish_reason on every retry).
-              if ('reasoning_text' in next && (!allowThinkingReplay || !('reasoning_opaque' in next))) {
-                delete next.reasoning_text;
-                mutated = true;
-              }
-              if (!allowThinkingReplay && !keepHistoricalThinking) {
-                for (const field of ['reasoning', 'reasoning_content', 'reasoning_opaque']) {
-                  if (field in next) { delete next[field]; mutated = true; }
+              // CAPI contract: never emit reasoning_text without reasoning_opaque,
+              // and omit thinking fields on completed historical turns unless the
+              // model family requires historical thinking in Chat Completions.
+              for (const field of ['reasoning_text', 'reasoning_opaque', 'reasoning', 'reasoning_content']) {
+                if (field in next && (!allowThinkingReplay || field === 'reasoning_text' && !('reasoning_opaque' in next))) {
+                  delete next[field];
+                  mutated = true;
                 }
               }
             }
@@ -158,7 +156,6 @@ export function geminiSignatureOptions(context, options = {}, targetModel) {
         for (const choice of chunk?.choices ?? []) {
           const opaque = choice?.message?.reasoning_opaque ?? choice?.delta?.reasoning_opaque;
           if (typeof opaque === 'string' && opaque.length > 0) {
-            // Official VS Code SSEProcessor uses last-non-empty-write-wins for reasoning_opaque.
             incoming.reasoningOpaque = opaque;
           }
           for (const call of choice?.delta?.tool_calls ?? []) {
@@ -194,11 +191,6 @@ export function attachGeminiSignatures(message, signatures) {
   let opaqueAttached = false;
   let changed = false;
 
-  // Prefer attaching `reasoning_opaque` to the thinking block (replacing pi-ai's
-  // literal `"reasoning_text"` placeholder). If the response had no readable
-  // thinking block (e.g. pure tool call or pure text with opaque state), attach
-  // it to the first text block's `textSignature` or first toolCall's `thoughtSignature`
-  // without altering block count (so BlockAssembler's length check stays intact).
   const hasThinking = message.content.some(block => block?.type === 'thinking');
   const content = message.content.map(block => {
     if (block?.type === 'thinking' && encodedOpaque && !opaqueAttached) {

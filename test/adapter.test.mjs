@@ -99,7 +99,7 @@ test('Google signatures survive streamed id/index split deltas and outgoing repl
   assert.equal(events[0].message.content[0].thoughtSignature, 'new-opaque-signature');
   assert.equal((await wrapped.result()).content[0].thoughtSignature, 'new-opaque-signature');
 });
-test('gemini-4-hydrogen reasoning_opaque is captured, replayed in-turn, stripped across user turns, and self-heals corrupted history', async () => {
+test('gemini-4-hydrogen reasoning_opaque is captured, preserved across mid-turn steer/time injections, and stripped after turn completion', async () => {
   const hydrogen = { id: 'gemini-4-hydrogen', provider: 'github-copilot', api: 'openai-completions' };
 
   // 1) Stream capture: reasoning_opaque replaces literal "reasoning_text" on thinking block;
@@ -127,29 +127,28 @@ test('gemini-4-hydrogen reasoning_opaque is captured, replayed in-turn, stripped
   assert.equal(textOnly.content.length, 1);
   assert.equal(textOnly.content[0].textSignature, 'copilot-reasoning-opaque:final-opaque-blob');
 
-  // 2) Outgoing replay & self-healing:
-  //    - Message 0: legacy corrupted historical turn (thinkingSignature === 'reasoning_text' without opaque) -> strip reasoning_text!
-  //    - Message 1: completed historical turn with valid opaque before a new user message -> strip historical thinking on Gemini!
-  //    - Message 2: active tool-calling step (followed only by toolResult, no later user message) with opaque on toolCall & empty thinking -> replay reasoning_opaque + reasoning_text: ""!
+  // 2) New-session multi-turn & mid-turn injection behavior:
+  //    - Turn 1 completed (toolCall -> toolResult -> final text reply), followed by Turn 2 user message -> historical, stripped on Gemini!
+  //    - Turn 2 active tool-call loop with a mid-turn user injection (e.g. DSH time-context or steer message) after toolResult -> still active task, MUST preserve reasoning_opaque + reasoning_text!
   const context = {
     messages: [
       { role: 'user', content: 'Turn 1' },
       {
         role: 'assistant', provider: 'github-copilot', api: 'openai-completions', model: 'gemini-4-hydrogen',
         content: [
-          { type: 'thinking', thinking: 'Corrupted summary without opaque', thinkingSignature: 'reasoning_text' },
-          { type: 'text', text: 'Turn 1 reply' },
+          { type: 'thinking', thinking: 'Turn 1 step 1 thinking', thinkingSignature: 'copilot-reasoning-opaque:t1-step1-opaque' },
+          { type: 'toolCall', id: 'call_t1', name: 'ping', arguments: { x: '1' } },
         ],
       },
-      { role: 'user', content: 'Turn 2' },
+      { role: 'toolResult', toolCallId: 'call_t1', toolName: 'ping', content: [{ type: 'text', text: 'pong1' }] },
       {
         role: 'assistant', provider: 'github-copilot', api: 'openai-completions', model: 'gemini-4-hydrogen',
         content: [
-          { type: 'thinking', thinking: 'Historical signed thinking', thinkingSignature: 'copilot-reasoning-opaque:hist-opaque' },
-          { type: 'text', text: 'Turn 2 reply' },
+          { type: 'thinking', thinking: 'Turn 1 final thinking', thinkingSignature: 'copilot-reasoning-opaque:t1-final-opaque' },
+          { type: 'text', text: 'Turn 1 done' },
         ],
       },
-      { role: 'user', content: 'Turn 3 with tool' },
+      { role: 'user', content: 'Turn 2 with tool and mid-turn time-context' },
       {
         role: 'assistant', provider: 'github-copilot', api: 'openai-completions', model: 'gemini-4-hydrogen',
         content: [
@@ -157,35 +156,60 @@ test('gemini-4-hydrogen reasoning_opaque is captured, replayed in-turn, stripped
         ],
       },
       { role: 'toolResult', toolCallId: 'call_ping', toolName: 'ping', content: [{ type: 'text', text: 'pong' }] },
+      { role: 'user', content: 'Time sampled while preparing turn 2, step 2: 2026-11-16T21:50:00+08:00' },
     ],
   };
   const replay = geminiSignatureOptions(context, {}, hydrogen);
   const wirePayload = {
     messages: [
       { role: 'user', content: 'Turn 1' },
-      { role: 'assistant', content: 'Turn 1 reply', reasoning_text: 'Corrupted summary without opaque' },
-      { role: 'user', content: 'Turn 2' },
-      { role: 'assistant', content: 'Turn 2 reply' },
-      { role: 'user', content: 'Turn 3 with tool' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'call_t1', type: 'function', function: { name: 'ping', arguments: '{"x":"1"}' } }] },
+      { role: 'tool', tool_call_id: 'call_t1', content: 'pong1' },
+      { role: 'assistant', content: 'Turn 1 done' },
+      { role: 'user', content: 'Turn 2 with tool and mid-turn time-context' },
       { role: 'assistant', content: null, tool_calls: [{ id: 'call_ping', type: 'function', function: { name: 'ping', arguments: '{"x":"hello"}' } }] },
       { role: 'tool', tool_call_id: 'call_ping', content: 'pong' },
+      { role: 'user', content: 'Time sampled while preparing turn 2, step 2: 2026-11-16T21:50:00+08:00' },
     ],
   };
   const patched = await replay.options.onPayload(wirePayload, hydrogen);
   const assistants = patched.messages.filter(m => m.role === 'assistant');
   assert.equal(assistants.length, 3);
-  // Corrupted historical turn healed: no dangling reasoning_text
+  // Both assistant steps of completed Turn 1 are stripped once Turn 2 starts
   assert.equal('reasoning_text' in assistants[0], false);
   assert.equal('reasoning_opaque' in assistants[0], false);
-  // Signed historical turn stripped across user turn on Gemini
   assert.equal('reasoning_text' in assistants[1], false);
   assert.equal('reasoning_opaque' in assistants[1], false);
-  // Active tool-call turn replayed with exact pair (reasoning_opaque + reasoning_text: "")
+  // Active Turn 2 tool-call step keeps reasoning_opaque + reasoning_text: "" even across mid-turn user injection
   assert.equal(assistants[2].reasoning_opaque, 'active-tool-opaque');
   assert.equal(assistants[2].reasoning_text, '');
   assert.equal(assistants[2].tool_calls[0].extra_content, undefined);
 
-  // 3) Kimi K3+ preserves signed historical thinking across user turns
+  // 3) If an interrupted/truncated response ever lacks reasoning_opaque, orphan reasoning_text is never emitted
+  const truncatedContext = {
+    messages: [
+      { role: 'user', content: 'Truncated turn' },
+      {
+        role: 'assistant', provider: 'github-copilot', api: 'openai-completions', model: 'gemini-4-hydrogen',
+        content: [
+          { type: 'thinking', thinking: 'Partial summary', thinkingSignature: 'reasoning_text' },
+          { type: 'toolCall', id: 'call_2', name: 'ping', arguments: { x: '2' } },
+        ],
+      },
+      { role: 'toolResult', toolCallId: 'call_2', toolName: 'ping', content: [{ type: 'text', text: 'pong' }] },
+    ],
+  };
+  const truncatedPatched = await geminiSignatureOptions(truncatedContext, {}, hydrogen).options.onPayload({
+    messages: [
+      { role: 'user', content: 'Truncated turn' },
+      { role: 'assistant', content: null, reasoning_text: 'Partial summary', tool_calls: [{ id: 'call_2', type: 'function', function: { name: 'ping', arguments: '{"x":"2"}' } }] },
+      { role: 'tool', tool_call_id: 'call_2', content: 'pong' },
+    ],
+  }, hydrogen);
+  assert.equal('reasoning_text' in truncatedPatched.messages[1], false);
+  assert.equal('reasoning_opaque' in truncatedPatched.messages[1], false);
+
+  // 4) Kimi K3+ preserves signed historical thinking across user turns
   const kimi = { id: 'kimi-k3', provider: 'github-copilot', api: 'openai-completions' };
   const kimiContext = {
     messages: [
