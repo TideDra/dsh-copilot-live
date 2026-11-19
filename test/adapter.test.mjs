@@ -175,11 +175,11 @@ test('gemini-4-hydrogen reasoning_opaque is captured, preserved across mid-turn 
   const patched = await replay.options.onPayload(wirePayload, hydrogen);
   const assistants = patched.messages.filter(m => m.role === 'assistant');
   assert.equal(assistants.length, 3);
-  // Both assistant steps of completed Turn 1 are stripped once Turn 2 starts
-  assert.equal('reasoning_text' in assistants[0], false);
-  assert.equal('reasoning_opaque' in assistants[0], false);
-  assert.equal('reasoning_text' in assistants[1], false);
-  assert.equal('reasoning_opaque' in assistants[1], false);
+  // Gemini preserves signed historical thinking + reasoning_opaque across turns (matching native agy 1.5.9+)
+  assert.equal(assistants[0].reasoning_opaque, 't1-step1-opaque');
+  assert.equal(assistants[0].reasoning_text, 'Turn 1 step 1 thinking');
+  assert.equal(assistants[1].reasoning_opaque, 't1-final-opaque');
+  assert.equal(assistants[1].reasoning_text, 'Turn 1 final thinking');
   // Active Turn 2 tool-call step keeps reasoning_opaque + reasoning_text: "" even across mid-turn user injection
   assert.equal(assistants[2].reasoning_opaque, 'active-tool-opaque');
   assert.equal(assistants[2].reasoning_text, '');

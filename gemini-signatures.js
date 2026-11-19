@@ -13,6 +13,9 @@ export function decodeCopilotOpaque(signature) {
 function isKimiK3Plus(modelId = '') {
   return /(?:^|[^a-z\d])kimi-k([3-9]|\d{2,})(?:[.\-p]|$)/i.test(modelId) || /(?:^|\/)k([3-9]|\d{2,})(?:[.\-:]|$)/i.test(modelId);
 }
+function isGeminiModel(modelId = '') {
+  return /(?:^|\/)gemini-/i.test(modelId);
+}
 
 /**
  * Build ordered replay plans for assistant messages emitted by pi-ai's
@@ -101,7 +104,7 @@ export function geminiSignatureOptions(context, options = {}, targetModel) {
         const payload = result ?? original;
         if (!payload || !Array.isArray(payload.messages)) return payload;
         const activeModel = model ?? targetModel ?? { provider: 'github-copilot', api: 'openai-completions', id: '' };
-        const keepHistoricalThinking = isKimiK3Plus(activeModel.id);
+        const keepHistoricalThinking = isKimiK3Plus(activeModel.id) || isGeminiModel(activeModel.id);
         const emittedPlans = buildAssistantReplayPlan(context?.messages, activeModel);
         let assistantCursor = 0;
         return {

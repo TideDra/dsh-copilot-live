@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-copilot-live",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "type": "module",
   "description": "Synchronize account-scoped GitHub Copilot models, capabilities and prices from the live API into DeepSeek Harness.",
   "license": "MIT",
